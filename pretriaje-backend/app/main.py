@@ -55,8 +55,9 @@ app = FastAPI(
     title="Pre-triaje - Backend de recolección conversacional",
     description=(
         "Prototipo de hackathon. Recolecta información clínica por chat para "
-        "que un motor de reglas de Manchester asigne la urgencia. "
-        "SIN validación clínica."
+        "que un motor de reglas asigne la urgencia, con una lógica de "
+        "priorización basada en la estructura del triaje de Manchester. NO es "
+        "una implementación validada del MTS y NO tiene validación clínica."
     ),
     version="0.1.0",
     lifespan=lifespan,

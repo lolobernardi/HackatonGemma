@@ -6,7 +6,14 @@
 
 Backend en FastAPI que conversa con una persona sobre sus síntomas, arma una
 ficha clínica estructurada turno a turno, y cuando tiene lo suficiente delega
-en un motor de reglas de Manchester que asigna el nivel de urgencia.
+en un motor de reglas que asigna el nivel de urgencia.
+
+> La priorización está **basada en la estructura del triaje de Manchester**
+> —discriminadores generales más específicos por motivo, cinco niveles con sus
+> tiempos— y **no es una implementación validada del MTS**. Los flowcharts del
+> Manchester Triage System tienen derechos y no se copiaron: los
+> discriminadores y umbrales son propios, y **no tienen validación clínica**.
+> Ver [`app/REGLAS.md`](app/REGLAS.md).
 
 El modelo de lenguaje es **Gemma 4 corriendo local vía Ollama**. Ningún dato
 del paciente sale de la máquina, y el estado de sesión vive solo en memoria: se
@@ -25,12 +32,11 @@ Este repo cubre **solo la recolección conversacional**:
 | Cliente Ollama, tool calling y parseo | ✅ |
 | Merge incremental de la ficha | ✅ |
 | Máquina de estados del turno (banderas rojas, límites, errores) | ✅ |
-| Motor de reglas de Manchester (`app/reglas.py`) | 🚧 **STUB — otra persona** |
+| Motor de clasificación de severidad (`app/reglas.py`) | ✅ — ver [`app/REGLAS.md`](app/REGLAS.md) |
 | Búsqueda de centros de salud (`app/recursos.py`) | 🚧 **STUB — otra persona** |
 
-Los dos stubs tienen la firma definitiva y un `TODO(equipo)` con el contrato
-esperado. `reglas.clasificar()` devuelve **amarillo fijo a propósito**: el
-fallback ante lo desconocido nunca debe ser un nivel bajo de urgencia.
+El stub que queda tiene la firma definitiva y un `TODO(equipo)` con el contrato
+esperado.
 
 ---
 
@@ -77,10 +83,17 @@ Documentación interactiva en <http://localhost:8000/docs>.
 ### 3. Los tests
 
 ```bash
-pytest -q
+pytest -q            # todo
+pytest -m subtriaje  # solo los casos críticos del motor de reglas
 ```
 
 No hace falta que Ollama esté corriendo: los tests mockean `llamar_gemma`.
+
+`pytest -m subtriaje` corre los casos clínicos donde se espera naranja o rojo.
+**Ese es el que tiene que bloquear el build**: un falso negativo ahí es alguien
+que se queda en casa cuando debería estar en una guardia. Los casos donde se
+espera verde o azul salen como warning si el motor clasifica de más. Ver
+[`app/REGLAS.md`](app/REGLAS.md#tests).
 
 ---
 
@@ -151,17 +164,24 @@ Con `tipo: "resultado"`:
 ```json
 {
   "tipo": "resultado",
-  "mensaje": "Conviene que te vea un médico hoy, sin dejarlo pasar.\n\n**Por qué te digo esto:** …",
+  "mensaje": "Necesitás que te vea un médico muy pronto, en menos de 10 minutos.\n\n**Por qué te digo esto:** …",
   "resultado": {
-    "color": "amarillo",
-    "motivo_clasificacion": "STUB - motor de reglas no implementado",
-    "discriminador_disparador": "ninguno",
+    "color": "naranja",
+    "motivo_clasificacion": "Muy urgente, atención dentro de los 10 minutos",
+    "discriminador_disparador": "dolor opresivo que se corre al brazo o a la mandíbula",
     "recursos": [
       {"nombre":"Hospital San Martín - Guardia","tipo":"guardia_hospitalaria","distancia_km":2.4,"ocupacion_estimada":"alta"}
     ]
   }
 }
 ```
+
+> El motor devuelve bastante más que eso —`traza`, `regla_id`,
+> `tiempo_maximo_min`, `tipo_recurso_sugerido`, `signos_alarma_reconsulta`,
+> `version_ruleset`— pero el modelo `Resultado` de la API todavía expone solo
+> estos tres campos. Sumar la traza a la respuesta (o al bloque `debug`) es lo
+> que permite mostrarle al jurado **por qué** salió naranja; está pendiente y
+> es un cambio de `schema.Resultado` + `orquestador._finalizar`, no del motor.
 
 ### `DELETE /sesion/{session_id}`
 
@@ -191,6 +211,10 @@ clínico, no una casualidad:
    prioridad clínica.
 7. **Si sí**, o se agotaron las preguntas: `reglas.clasificar()` →
    `recursos.buscar_recurso()` → mensaje final → **se borra la sesión**.
+
+`reglas.clasificar()` acepta la ficha esté como esté —incluso vacía— y nunca
+lanza, así que el paso 7 no necesita ningún `try/except`. Los campos que
+falten no bajan el color: el motor los cuenta y pone un piso en amarillo.
 
 ### Invariantes que no se tocan
 
@@ -252,32 +276,37 @@ app/
   prompt.py        System prompt + armado por turno + prioridad de campos
   gemma.py         Cliente Ollama, schema de la tool, parseo, merge_ficha
   orquestador.py   Máquina de estados del turno
-  reglas.py        🚧 STUB — motor de Manchester
+  reglas.py        Motor de clasificación de severidad  → REGLAS.md
+  ruleset.yaml     Las reglas como datos, revisables sin leer Python
   recursos.py      🚧 STUB — búsqueda de centros
-tests/             58 tests, sin necesidad de Ollama
+tests/             380 tests, sin necesidad de Ollama
 ```
 
 ---
 
-## Para quien implemente los stubs
+## Para quien implemente el stub que queda
 
-Ambos módulos importan sus modelos de `app/schema.py`, así que no hace falta
+`recursos.py` importa sus modelos de `app/schema.py`, así que no hace falta
 tocar nada más. Lo único que no puede cambiar es la firma:
 
 ```python
-# app/reglas.py
-def clasificar(ficha: FichaClinica) -> Clasificacion: ...
-
 # app/recursos.py
 def buscar_recurso(color, especialidad, lat, lng) -> list[Recurso]: ...
 ```
 
-Dos cosas a tener en cuenta en `reglas.py`:
+El motor de reglas ya le pasa `clasificacion.color`, y tiene además un
+`tipo_recurso_sugerido` (`guardia_alta_complejidad`, `guardia`,
+`centro_urgencias`, `caps`, `consulta_programada`) y una
+`especialidad_sugerida` que hoy el orquestador no está reenviando: son un mejor
+criterio de filtro que el color solo.
 
-- **La ficha puede llegar incompleta.** Si se agotaron las preguntas o los
-  turnos, se clasifica con lo que haya. Campos en `None` son la norma.
-- **`None` significa "no se sabe", nunca "no".** Ante la duda hay que subir la
-  urgencia, no bajarla.
+## Para quien toque el ruleset
 
-El `discriminador_disparador` que devuelvas se le muestra a la persona como la
-razón de su clasificación, así que tiene que ser algo legible.
+Los umbrales viven en [`app/ruleset.yaml`](app/ruleset.yaml) y se pueden
+revisar sin leer Python. Antes de tocarlos, leer
+[`app/REGLAS.md`](app/REGLAS.md) — sobre todo la sección de limitaciones y la
+tabla de revisión clínica, que **está vacía a propósito**.
+
+```bash
+pytest -m subtriaje    # el gate que tiene que bloquear el build
+```

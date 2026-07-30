@@ -1,0 +1,825 @@
+# =========================================================================== #
+#  Ruleset de priorización — prototipo de pre-triaje                          #
+# =========================================================================== #
+#
+#  ⚠️  SIN VALIDACIÓN CLÍNICA. Los umbrales de este archivo son razonables
+#      para un prototipo de hackathon y nada más. No fueron revisados ni
+#      aprobados por un profesional de la salud. Ver app/REGLAS.md.
+#
+#  Lógica de priorización basada en la ESTRUCTURA del triaje de Manchester
+#  (discriminadores generales + flowchart por motivo, cinco niveles con sus
+#  tiempos). NO es una implementación del Manchester Triage System ni deriva
+#  de sus flowcharts, que son material con derechos del Manchester Triage
+#  Group. Los discriminadores y umbrales de acá son propios.
+#
+# --------------------------------------------------------------------------- #
+#  Cómo leer una regla
+# --------------------------------------------------------------------------- #
+#
+#    - id: DT-02                 identificador estable, aparece en la traza
+#      condiciones:              se evalúan en AND. {} = siempre matchea
+#        disnea_asociada: true   matchea SOLO con True. Un None NO matchea.
+#        dolor_eva: {min: 8}     numérico. Un None NO matchea.
+#      color: naranja            nivel que la regla propone
+#      disparador: "..."         se le muestra a la persona: tiene que ser
+#                                legible, sin jerga y sin nombres de campo
+#      aplica_a: pediatrico      cualquiera (default) | adulto | pediatrico |
+#                                lactante. Si la edad es None se evalúan
+#                                TODOS los grupos (lo más conservador).
+#      especialidad: cardiologia opcional
+#      signos_alarma: [...]      opcional, se suma a los generales
+#      por_defecto: true         marca la clasificación como "de fallback"
+#
+#  El evaluador toma la regla MÁS URGENTE que matcheó, no la primera: el
+#  orden de este archivo no cambia el resultado. Ante empate de color gana la
+#  regla con más condiciones (la más específica), y si sigue el empate, el id
+#  mayor alfabéticamente. Todo determinístico, todo independiente del orden.
+#
+#  La urgencia SOLO SUBE: el flowchart nunca puede bajar el piso que fijaron
+#  los discriminadores generales.
+#
+# =========================================================================== #
+
+version: "0.1.0"
+
+# Se agregan a los signos de alarma de la regla que ganó, en todo resultado.
+signos_alarma_generales:
+  - "si te cuesta respirar o te falta el aire"
+  - "si el dolor se hace mucho más fuerte o cambia de lugar"
+  - "si te sentís muy adormecido, confundido o te desmayás"
+  - "si aparece un sangrado que no para"
+
+# =========================================================================== #
+#  Etapa 1 — Discriminadores generales
+#  Aplican a cualquier motivo de consulta y fijan un PISO de urgencia.
+# =========================================================================== #
+
+generales:
+  # --- Riesgo vital inmediato --------------------------------------------- #
+  - id: GEN-ROJO-01
+    condiciones:
+      nivel_conciencia: no_responde
+    color: rojo
+    disparador: "la persona no responde"
+
+  - id: GEN-ROJO-02
+    condiciones:
+      respira_normalmente: false
+    color: rojo
+    disparador: "dificultad grave para respirar"
+
+  - id: GEN-ROJO-03
+    condiciones:
+      riesgo_via_aerea: true
+    color: rojo
+    disparador: "algo le está obstruyendo la garganta o la vía aérea"
+
+  - id: GEN-ROJO-04
+    condiciones:
+      hemorragia_mayor: true
+    color: rojo
+    disparador: "un sangrado abundante que no se detiene"
+
+  # --- Alteración del sensorio -------------------------------------------- #
+  - id: GEN-NAR-01
+    condiciones:
+      nivel_conciencia: confuso
+    color: naranja
+    disparador: "está confundido o desorientado"
+
+  - id: GEN-NAR-02
+    condiciones:
+      nivel_conciencia: somnoliento
+    color: naranja
+    disparador: "está muy adormecido y cuesta mantenerlo despierto"
+
+  # --- Dolor --------------------------------------------------------------- #
+  - id: GEN-NAR-03
+    condiciones:
+      dolor_eva: {min: 8}
+    color: naranja
+    disparador: "dolor muy intenso"
+
+  - id: GEN-AMA-01
+    condiciones:
+      dolor_eva: {min: 5, max: 7}
+    color: amarillo
+    disparador: "dolor moderado"
+
+  - id: GEN-VER-01
+    condiciones:
+      dolor_eva: {min: 1, max: 4}
+    color: verde
+    disparador: "dolor leve"
+
+  # --- Temperatura (umbrales de adulto; los pediátricos van más abajo) ----- #
+  - id: GEN-NAR-04
+    condiciones:
+      temperatura_c: {min: 41.0}
+    color: naranja
+    disparador: "fiebre muy alta"
+
+  - id: GEN-NAR-05
+    condiciones:
+      temperatura_c: {max: 35.0}
+    color: naranja
+    disparador: "temperatura corporal muy baja"
+
+  - id: GEN-AMA-02
+    condiciones:
+      temperatura_c: {min: 38.5, max: 40.9}
+    color: amarillo
+    disparador: "fiebre alta"
+
+  # --- Forma de comienzo ---------------------------------------------------- #
+  - id: GEN-AMA-03
+    condiciones:
+      inicio: subito
+      dolor_eva: {min: 6}
+    color: amarillo
+    disparador: "un dolor fuerte que empezó de golpe"
+
+# =========================================================================== #
+#  Etapa 1b — Bloque pediátrico
+#  Piso propio. El mismo dato no significa lo mismo en un bebé que en un
+#  adulto, así que estas reglas viven separadas y no se mezclan con las de
+#  arriba. Se evalúan cuando la edad cae en el grupo, y también cuando la
+#  edad es desconocida (ahí se aplican los umbrales más conservadores).
+#
+#  ⚠️  `edad` en el schema es un entero de años (Pydantic no acepta 0.2), así
+#      que "lactante" es edad == 0, es decir de 0 a 11 meses. No podemos
+#      distinguir un recién nacido de un bebé de 10 meses: el ruleset trata a
+#      todo el grupo con el criterio del más chico, que es lo conservador.
+# =========================================================================== #
+
+pediatricos:
+  - id: PED-LAC-NAR-01
+    aplica_a: lactante
+    condiciones:
+      temperatura_c: {min: 38.0}
+    color: naranja
+    disparador: "fiebre en un bebé de menos de un año"
+    especialidad: pediatria
+    signos_alarma:
+      - "si el bebé está decaído, no se despierta bien o rechaza el pecho o la mamadera"
+
+  - id: PED-LAC-NAR-02
+    aplica_a: lactante
+    condiciones:
+      temperatura_c: {max: 36.0}
+    color: naranja
+    disparador: "temperatura baja en un bebé de menos de un año"
+    especialidad: pediatria
+
+  - id: PED-LAC-AMA-01
+    aplica_a: lactante
+    condiciones: {}
+    color: amarillo
+    disparador: "se trata de un bebé de menos de un año"
+    especialidad: pediatria
+    por_defecto: true
+
+  - id: PED-NAR-01
+    aplica_a: pediatrico
+    condiciones:
+      temperatura_c: {min: 40.0}
+    color: naranja
+    disparador: "fiebre muy alta en un chico"
+    especialidad: pediatria
+
+  - id: PED-NAR-02
+    aplica_a: pediatrico
+    condiciones:
+      nivel_conciencia: somnoliento
+    color: naranja
+    disparador: "un chico muy adormecido, que cuesta despertar"
+    especialidad: pediatria
+
+  - id: PED-AMA-01
+    aplica_a: pediatrico
+    condiciones:
+      temperatura_c: {min: 38.0, max: 39.9}
+    color: amarillo
+    disparador: "fiebre en un chico"
+    especialidad: pediatria
+
+# =========================================================================== #
+#  Etapa 2 — Flowcharts por motivo de consulta
+#
+#  `discriminadores` es el VOCABULARIO: las claves exactas que el modelo tiene
+#  permitido escribir en `discriminadores_especificos`, con su descripción en
+#  lenguaje coloquial. El motor lo exporta como DISCRIMINADORES_POR_MOTIVO y
+#  el backend de recolección lo inyecta en el schema de la tool y en el
+#  prompt. Un solo lugar define el vocabulario, dos módulos lo consumen.
+#
+#  `campos_clave` son los datos sin los cuales no se puede afirmar que el
+#  cuadro es benigno. Mientras falte alguno, la etapa 3 pone el piso en
+#  amarillo: los niveles bajos requieren evidencia positiva, no ausencia de
+#  alarma.
+#
+#  La regla `*-DEFAULT` de cada flowchart fija el PISO del motivo: el nivel
+#  mínimo que le corresponde a esa consulta aunque no haya ningún signo de
+#  alarma. Por eso dolor torácico nunca baja de amarillo y una lesión de piel
+#  puede llegar a azul.
+# =========================================================================== #
+
+flowcharts:
+
+  # ------------------------------------------------------------------------ #
+  dolor_toracico:
+    descripcion: "Dolor, presión u opresión en el pecho"
+    campos_clave:
+      - discriminadores_especificos.dolor_opresivo
+      - discriminadores_especificos.disnea_asociada
+    discriminadores:
+      dolor_opresivo: "el dolor se siente como una presión o un peso, no como una puntada"
+      irradiacion_brazo_mandibula: "el dolor se corre al brazo, al cuello o a la mandíbula"
+      disnea_asociada: "le falta el aire junto con el dolor"
+      sudoracion_profusa: "está sudando frío"
+      dolor_con_esfuerzo: "aparece o empeora al hacer esfuerzo"
+      antecedente_cardiaco: "tuvo problemas del corazón antes"
+      dolor_aumenta_al_respirar: "el dolor aumenta al respirar hondo o al toser"
+      dolor_reproducible_palpacion: "el dolor aparece o empeora al apretar la zona con el dedo"
+    reglas:
+      - id: DT-01
+        condiciones:
+          dolor_opresivo: true
+          irradiacion_brazo_mandibula: true
+        color: naranja
+        disparador: "dolor opresivo que se corre al brazo o a la mandíbula"
+        especialidad: cardiologia
+        signos_alarma:
+          - "si el dolor aumenta o no se va en 10 minutos"
+          - "si empezás a sudar frío o te falta el aire"
+
+      - id: DT-02
+        condiciones:
+          disnea_asociada: true
+        color: naranja
+        disparador: "dolor de pecho con falta de aire"
+        especialidad: cardiologia
+        signos_alarma:
+          - "si te cuesta cada vez más respirar o no podés hablar de corrido"
+
+      - id: DT-03
+        condiciones:
+          dolor_opresivo: true
+          sudoracion_profusa: true
+        color: naranja
+        disparador: "dolor opresivo en el pecho con sudoración fría"
+        especialidad: cardiologia
+
+      - id: DT-04
+        condiciones:
+          dolor_opresivo: true
+          antecedente_cardiaco: true
+        color: naranja
+        disparador: "dolor opresivo en alguien que ya tuvo problemas del corazón"
+        especialidad: cardiologia
+
+      - id: DT-05
+        condiciones:
+          dolor_con_esfuerzo: true
+        color: amarillo
+        disparador: "dolor de pecho que aparece al hacer esfuerzo"
+        especialidad: cardiologia
+
+      - id: DT-06
+        condiciones:
+          dolor_reproducible_palpacion: true
+          dolor_opresivo: false
+          disnea_asociada: false
+        color: verde
+        disparador: "dolor de la pared del pecho, que se reproduce al apretar la zona"
+
+      - id: DT-DEFAULT
+        condiciones: {}
+        color: amarillo
+        disparador: "dolor de pecho sin signos de alarma identificados"
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  dificultad_respiratoria:
+    descripcion: "Falta de aire, ahogo, respiración trabajosa"
+    campos_clave:
+      - discriminadores_especificos.dificultad_para_hablar
+    discriminadores:
+      dificultad_para_hablar: "no puede terminar una frase sin frenar para tomar aire"
+      cianosis: "tiene los labios o las puntas de los dedos azulados"
+      cuerpo_extrano: "se atragantó con algo (comida, un objeto)"
+      sibilancias: "le silba el pecho al respirar"
+      antecedente_asma_epoc: "tiene asma, EPOC o bronquitis crónica"
+      dolor_toracico_asociado: "le duele el pecho junto con la falta de aire"
+      tos_productiva: "tose con catarro o flema"
+      empeora_acostado: "empeora cuando se acuesta y mejora sentado"
+      hinchazon_piernas: "tiene las piernas o los tobillos hinchados"
+    reglas:
+      - id: DR-01
+        condiciones:
+          cianosis: true
+        color: rojo
+        disparador: "labios o dedos azulados"
+
+      - id: DR-02
+        condiciones:
+          cuerpo_extrano: true
+        color: rojo
+        disparador: "se atragantó con algo"
+
+      - id: DR-03
+        condiciones:
+          dificultad_para_hablar: true
+        color: naranja
+        disparador: "no puede terminar una frase sin frenar a respirar"
+        signos_alarma:
+          - "si le cuesta cada vez más respirar o se pone somnoliento"
+
+      - id: DR-04
+        condiciones:
+          sibilancias: true
+          antecedente_asma_epoc: true
+        color: naranja
+        disparador: "silbidos en el pecho en alguien con asma o EPOC"
+        especialidad: neumonologia
+
+      - id: DR-05
+        condiciones:
+          dolor_toracico_asociado: true
+        color: naranja
+        disparador: "falta de aire junto con dolor en el pecho"
+        especialidad: cardiologia
+
+      - id: DR-06
+        condiciones:
+          empeora_acostado: true
+          hinchazon_piernas: true
+        color: naranja
+        disparador: "falta de aire al acostarse, con las piernas hinchadas"
+        especialidad: cardiologia
+
+      - id: DR-07
+        condiciones:
+          sibilancias: true
+        color: amarillo
+        disparador: "silbidos en el pecho al respirar"
+        especialidad: neumonologia
+
+      - id: DR-08
+        condiciones:
+          tos_productiva: true
+          dificultad_para_hablar: false
+          sibilancias: false
+        color: amarillo
+        disparador: "tos con catarro, sin dificultad para hablar ni silbidos"
+
+      - id: DR-DEFAULT
+        condiciones: {}
+        color: amarillo
+        disparador: "falta de aire sin signos de alarma identificados"
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  fiebre:
+    descripcion: "Fiebre, con o sin foco identificado"
+    campos_clave:
+      - discriminadores_generales.temperatura_c
+    discriminadores:
+      rigidez_nuca: "no puede doblar el cuello hacia adelante"
+      exantema_petequial: "manchas rojas o moradas que no desaparecen al apretarlas"
+      foco_respiratorio: "tiene tos, dolor de garganta o congestión"
+      vomitos_persistentes: "vomita todo lo que toma"
+      inmunocomprometido: "toma medicación que baja las defensas, o está en tratamiento oncológico"
+      convulsion_febril: "tuvo una convulsión con la fiebre"
+      decaimiento_marcado: "está muy decaído, mucho más que de costumbre"
+      irritabilidad_inconsolable: "llora sin parar y no hay forma de calmarlo"
+      rechazo_alimento: "no quiere comer ni tomar nada"
+      viaje_reciente: "viajó hace poco a otra provincia o a otro país"
+    reglas:
+      - id: FB-01
+        condiciones:
+          exantema_petequial: true
+        color: rojo
+        disparador: "manchas moradas que no desaparecen al apretarlas"
+        signos_alarma:
+          - "si aparecen más manchas o la persona se pone somnolienta"
+
+      - id: FB-02
+        condiciones:
+          rigidez_nuca: true
+        color: naranja
+        disparador: "fiebre con rigidez en el cuello"
+
+      - id: FB-03
+        condiciones:
+          convulsion_febril: true
+        color: naranja
+        disparador: "una convulsión durante la fiebre"
+
+      - id: FB-04
+        condiciones:
+          inmunocomprometido: true
+        color: naranja
+        disparador: "fiebre en alguien con las defensas bajas"
+
+      - id: FB-05
+        condiciones:
+          decaimiento_marcado: true
+        color: naranja
+        disparador: "fiebre con decaimiento importante"
+
+      - id: FB-06
+        condiciones:
+          vomitos_persistentes: true
+        color: amarillo
+        disparador: "fiebre con vómitos que no paran"
+
+      - id: FB-07
+        condiciones:
+          viaje_reciente: true
+        color: amarillo
+        disparador: "fiebre después de un viaje reciente"
+        especialidad: infectologia
+
+      - id: FB-08
+        condiciones:
+          foco_respiratorio: true
+          rigidez_nuca: false
+          exantema_petequial: false
+          temperatura_c: {max: 38.4}
+        color: verde
+        disparador: "fiebre baja con síntomas de resfrío, sin signos de alarma"
+
+      - id: FB-PED-01
+        aplica_a: pediatrico
+        condiciones:
+          irritabilidad_inconsolable: true
+        color: naranja
+        disparador: "un chico que llora sin parar y no se calma"
+        especialidad: pediatria
+
+      - id: FB-PED-02
+        aplica_a: pediatrico
+        condiciones:
+          rechazo_alimento: true
+        color: amarillo
+        disparador: "un chico con fiebre que no quiere comer ni tomar nada"
+        especialidad: pediatria
+
+      - id: FB-DEFAULT
+        condiciones: {}
+        color: verde
+        disparador: "fiebre sin signos de alarma identificados"
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  dolor_abdominal:
+    descripcion: "Dolor de panza"
+    campos_clave:
+      - discriminadores_generales.dolor_eva
+    discriminadores:
+      abdomen_rigido: "la panza está dura como una tabla y duele al tocarla"
+      vomito_con_sangre: "vomitó sangre o algo parecido a borra de café"
+      sangre_en_materia_fecal: "hay sangre en la materia fecal, o es negra como alquitrán"
+      dolor_fosa_iliaca_derecha: "el dolor se concentra abajo a la derecha"
+      embarazo_posible: "hay posibilidad de que esté embarazada"
+      sin_evacuar_ni_gases: "hace rato que no puede evacuar ni eliminar gases"
+      dolor_irradiado_espalda: "el dolor se corre a la espalda o a la cintura"
+      fiebre_asociada: "tiene fiebre junto con el dolor"
+      vomitos_persistentes: "vomita todo lo que toma"
+    reglas:
+      - id: DA-01
+        condiciones:
+          vomito_con_sangre: true
+        color: naranja
+        disparador: "vómitos con sangre"
+        especialidad: gastroenterologia
+
+      - id: DA-02
+        condiciones:
+          abdomen_rigido: true
+        color: naranja
+        disparador: "la panza dura y muy dolorosa al tocarla"
+        especialidad: cirugia_general
+
+      - id: DA-03
+        condiciones:
+          embarazo_posible: true
+        color: naranja
+        disparador: "dolor de panza con posibilidad de embarazo"
+        especialidad: ginecologia
+
+      - id: DA-04
+        condiciones:
+          dolor_irradiado_espalda: true
+          dolor_eva: {min: 7}
+        color: naranja
+        disparador: "dolor intenso que se corre a la espalda"
+
+      - id: DA-05
+        condiciones:
+          sangre_en_materia_fecal: true
+        color: amarillo
+        disparador: "sangre en la materia fecal"
+        especialidad: gastroenterologia
+
+      - id: DA-06
+        condiciones:
+          dolor_fosa_iliaca_derecha: true
+        color: amarillo
+        disparador: "dolor concentrado abajo a la derecha de la panza"
+        especialidad: cirugia_general
+
+      - id: DA-07
+        condiciones:
+          sin_evacuar_ni_gases: true
+        color: amarillo
+        disparador: "no poder evacuar ni eliminar gases"
+        especialidad: cirugia_general
+
+      - id: DA-08
+        condiciones:
+          fiebre_asociada: true
+        color: amarillo
+        disparador: "dolor de panza con fiebre"
+
+      - id: DA-09
+        condiciones:
+          vomitos_persistentes: true
+        color: amarillo
+        disparador: "vómitos que no paran"
+
+      - id: DA-DEFAULT
+        condiciones: {}
+        color: verde
+        disparador: "dolor de panza sin signos de alarma identificados"
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  herida_sangrado:
+    descripcion: "Heridas, cortes y sangrados"
+    campos_clave:
+      - discriminadores_especificos.sangrado_activo
+    discriminadores:
+      sangrado_activo: "sigue sangrando ahora"
+      sangrado_no_para_con_presion: "sigue sangrando aunque le hagan presión encima"
+      herida_profunda: "la herida es profunda, se ven los bordes separados"
+      herida_por_arma_o_mordedura: "fue con un arma, o es una mordedura de animal o persona"
+      cuerpo_extrano_en_herida: "quedó algo adentro de la herida (vidrio, metal, tierra)"
+      signos_infeccion: "la zona está roja, caliente, hinchada o supura"
+      vacuna_antitetanica_vigente: "tiene la vacuna antitetánica al día"
+      herida_en_cara_o_manos: "la herida es en la cara, en las manos o en los genitales"
+    reglas:
+      - id: HS-01
+        condiciones:
+          sangrado_no_para_con_presion: true
+        color: rojo
+        disparador: "un sangrado que no para ni haciendo presión"
+
+      - id: HS-02
+        condiciones:
+          herida_por_arma_o_mordedura: true
+        color: naranja
+        disparador: "una herida por arma o una mordedura"
+
+      - id: HS-03
+        condiciones:
+          herida_profunda: true
+        color: naranja
+        disparador: "una herida profunda"
+        especialidad: cirugia_general
+
+      - id: HS-04
+        condiciones:
+          sangrado_activo: true
+        color: amarillo
+        disparador: "una herida que sigue sangrando"
+
+      - id: HS-05
+        condiciones:
+          cuerpo_extrano_en_herida: true
+        color: amarillo
+        disparador: "algo que quedó adentro de la herida"
+        especialidad: cirugia_general
+
+      - id: HS-06
+        condiciones:
+          signos_infeccion: true
+        color: amarillo
+        disparador: "signos de infección en la herida"
+
+      - id: HS-07
+        condiciones:
+          vacuna_antitetanica_vigente: false
+        color: amarillo
+        disparador: "una herida con la vacuna antitetánica no vigente"
+
+      - id: HS-08
+        condiciones:
+          herida_en_cara_o_manos: true
+        color: amarillo
+        disparador: "una herida en la cara, las manos o los genitales"
+        especialidad: cirugia_general
+
+      - id: HS-09
+        condiciones:
+          sangrado_activo: false
+          herida_profunda: false
+          signos_infeccion: false
+        color: verde
+        disparador: "una herida superficial que ya no sangra ni está infectada"
+
+      - id: HS-DEFAULT
+        condiciones: {}
+        color: verde
+        disparador: "herida sin signos de alarma identificados"
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  cefalea:
+    descripcion: "Dolor de cabeza"
+    campos_clave:
+      - discriminadores_generales.dolor_eva
+    discriminadores:
+      deficit_neurologico: "no puede mover bien un brazo o una pierna, se le desvía la cara o le cuesta hablar"
+      peor_dolor_de_la_vida: "es el peor dolor de cabeza que tuvo en su vida"
+      rigidez_nuca: "no puede doblar el cuello hacia adelante"
+      vomitos_en_chorro: "vomita de golpe, sin náuseas antes"
+      alteracion_visual: "ve doble, borroso o le aparecen luces"
+      fotofobia: "le molesta mucho la luz"
+      cefalea_habitual: "es el mismo dolor de cabeza que le agarra siempre"
+      traumatismo_reciente: "se golpeó la cabeza hace poco"
+      fiebre_asociada: "tiene fiebre junto con el dolor de cabeza"
+    reglas:
+      - id: CF-01
+        condiciones:
+          deficit_neurologico: true
+        color: rojo
+        disparador: "no poder mover bien una parte del cuerpo o hablar con normalidad"
+        especialidad: neurologia
+
+      - id: CF-02
+        condiciones:
+          peor_dolor_de_la_vida: true
+        color: naranja
+        disparador: "el peor dolor de cabeza de su vida"
+        especialidad: neurologia
+
+      - id: CF-03
+        condiciones:
+          rigidez_nuca: true
+        color: naranja
+        disparador: "dolor de cabeza con rigidez en el cuello"
+
+      - id: CF-04
+        condiciones:
+          inicio: subito
+          dolor_eva: {min: 8}
+        color: naranja
+        disparador: "un dolor de cabeza muy fuerte que empezó de golpe"
+        especialidad: neurologia
+
+      - id: CF-05
+        condiciones:
+          vomitos_en_chorro: true
+        color: naranja
+        disparador: "vómitos de golpe junto con el dolor de cabeza"
+        especialidad: neurologia
+
+      - id: CF-06
+        condiciones:
+          traumatismo_reciente: true
+        color: naranja
+        disparador: "dolor de cabeza después de un golpe en la cabeza"
+
+      - id: CF-07
+        condiciones:
+          alteracion_visual: true
+        color: amarillo
+        disparador: "cambios en la visión junto con el dolor de cabeza"
+        especialidad: neurologia
+
+      - id: CF-08
+        condiciones:
+          fiebre_asociada: true
+        color: amarillo
+        disparador: "dolor de cabeza con fiebre"
+
+      - id: CF-09
+        condiciones:
+          cefalea_habitual: true
+          deficit_neurologico: false
+          rigidez_nuca: false
+          dolor_eva: {max: 4}
+        color: verde
+        disparador: "el dolor de cabeza de siempre, leve y sin signos de alarma"
+
+      - id: CF-DEFAULT
+        condiciones: {}
+        color: verde
+        disparador: "dolor de cabeza sin signos de alarma identificados"
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  lesion_cutanea:
+    descripcion: "Manchas, ronchas, ampollas y lesiones en la piel"
+    campos_clave:
+      - discriminadores_especificos.signos_infeccion
+      - discriminadores_especificos.lesion_extensa
+    discriminadores:
+      hinchazon_labios_lengua: "se le hincharon los labios, la lengua o los párpados"
+      afecta_mucosas: "las lesiones le agarraron la boca, los ojos o los genitales"
+      ampollas: "tiene ampollas o la piel se despega"
+      lesion_que_avanza_rapido: "la mancha se está agrandando en cuestión de horas"
+      dolor_desproporcionado: "duele muchísimo más de lo que se ve"
+      lesion_extensa: "ocupa una zona grande del cuerpo"
+      signos_infeccion: "la zona está roja, caliente, hinchada o supura"
+      fiebre_asociada: "tiene fiebre junto con las lesiones"
+      mordedura_o_picadura: "fue después de una picadura o una mordedura"
+      lesion_antigua_sin_cambios: "la tiene desde hace mucho y no cambió"
+    reglas:
+      - id: LC-01
+        condiciones:
+          hinchazon_labios_lengua: true
+        color: rojo
+        disparador: "hinchazón de los labios o la lengua"
+
+      - id: LC-02
+        condiciones:
+          ampollas: true
+          afecta_mucosas: true
+        color: naranja
+        disparador: "ampollas que también afectan la boca o los ojos"
+        especialidad: dermatologia
+
+      - id: LC-03
+        condiciones:
+          lesion_que_avanza_rapido: true
+        color: naranja
+        disparador: "una lesión que se agranda en cuestión de horas"
+
+      - id: LC-04
+        condiciones:
+          dolor_desproporcionado: true
+        color: naranja
+        disparador: "dolor muchísimo mayor de lo que se ve en la piel"
+
+      - id: LC-05
+        condiciones:
+          fiebre_asociada: true
+        color: amarillo
+        disparador: "lesiones en la piel con fiebre"
+
+      - id: LC-06
+        condiciones:
+          signos_infeccion: true
+        color: amarillo
+        disparador: "signos de infección en la piel"
+        especialidad: dermatologia
+
+      - id: LC-07
+        condiciones:
+          lesion_extensa: true
+        color: amarillo
+        disparador: "lesiones que ocupan una zona grande del cuerpo"
+        especialidad: dermatologia
+
+      - id: LC-08
+        condiciones:
+          ampollas: true
+        color: amarillo
+        disparador: "ampollas en la piel"
+        especialidad: dermatologia
+
+      - id: LC-09
+        condiciones:
+          mordedura_o_picadura: true
+        color: amarillo
+        disparador: "una lesión después de una picadura o mordedura"
+
+      - id: LC-10
+        condiciones:
+          lesion_antigua_sin_cambios: true
+          signos_infeccion: false
+          lesion_extensa: false
+        color: azul
+        disparador: "una lesión de larga data que no cambió"
+        especialidad: dermatologia
+
+      - id: LC-DEFAULT
+        condiciones: {}
+        color: azul
+        disparador: "lesión en la piel sin signos de alarma identificados"
+        especialidad: dermatologia
+        por_defecto: true
+
+  # ------------------------------------------------------------------------ #
+  otro:
+    descripcion: "Motivo que no encaja en ningún flowchart del prototipo"
+    campos_clave: []
+    discriminadores: {}
+    reglas:
+      - id: OTRO-DEFAULT
+        condiciones: {}
+        color: amarillo
+        disparador: "un motivo de consulta que este sistema no sabe evaluar"
+        por_defecto: true

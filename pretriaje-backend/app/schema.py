@@ -29,6 +29,16 @@ Inicio = Literal["subito", "gradual"]
 ColorTriaje = Literal["rojo", "naranja", "amarillo", "verde", "azul"]
 TipoRespuesta = Literal["pregunta", "resultado", "derivacion_inmediata", "error_seguro"]
 
+# Tipo de efector al que conviene derivar. Lo decide el motor de reglas, no la
+# plantilla de mensajes: es conocimiento clínico y vive en un solo lugar.
+TipoRecurso = Literal[
+    "guardia_alta_complejidad",
+    "guardia",
+    "centro_urgencias",
+    "caps",
+    "consulta_programada",
+]
+
 # Valor que puede tomar un discriminador específico de un flowchart.
 ValorDiscriminador = bool | int | float | str | None
 
@@ -41,8 +51,9 @@ ValorDiscriminador = bool | int | float | str | None
 class DiscriminadoresGenerales(BaseModel):
     """Discriminadores que definen riesgo vital, aplicables a cualquier motivo.
 
-    En Manchester estos se evalúan siempre, antes que los específicos del
-    flowchart. Por eso el orquestador los prioriza al preguntar y el chequeo
+    Se evalúan siempre, antes que los específicos del flowchart, y fijan un
+    piso de urgencia que el flowchart puede subir pero nunca bajar (ver
+    `reglas.py`). Por eso el orquestador los prioriza al preguntar y el chequeo
     de bandera roja mira únicamente los cuatro primeros.
     """
 
@@ -74,7 +85,7 @@ class FichaClinica(BaseModel):
     # "mi hijo tiene fiebre" -> es_para_tercero=True. Cambia los umbrales
     # pediátricos que aplica el motor de reglas.
     es_para_tercero: bool = False
-    # Slug del flowchart de Manchester. Los valores válidos viven en
+    # Slug del flowchart del ruleset. Los valores válidos viven en
     # `config.MOTIVOS_CONSULTA` y se le imponen a Gemma vía enum en el schema
     # de la tool; acá queda como str para no romper si el modelo inventa uno.
     motivo_consulta: str | None = None
@@ -137,15 +148,47 @@ class RespuestaGemma(BaseModel):
 
 
 class Clasificacion(BaseModel):
-    """Veredicto del motor de reglas de Manchester (ver `reglas.py`)."""
+    """Veredicto del motor de reglas (ver `reglas.py`).
+
+    Es la única pieza del sistema autorizada a decidir urgencia. El modelo de
+    lenguaje no opina sobre esto, y la plantilla de mensajes tampoco: todo lo
+    que sigue de la clasificación (cuánto puede esperar, a qué tipo de efector
+    conviene ir, qué signos de alarma mirar) sale de acá, porque es
+    conocimiento clínico y duplicarlo en dos módulos es cómo se desincronizan.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     color: ColorTriaje
+    # Ventana de atención recomendada. 0 / 10 / 60 / 120 / 240 según el color.
+    tiempo_maximo_min: int
     motivo_clasificacion: str
     # Qué discriminador concreto disparó el color. Es lo que se le explica a
-    # la persona en el mensaje final: el "por qué" de la clasificación.
+    # la persona en el mensaje final: el "por qué" de la clasificación. Tiene
+    # que ser legible por una persona, no una expresión del ruleset.
     discriminador_disparador: str
+
+    # --- Trazabilidad: el "verificable" del proyecto ---------------------- #
+    # Identificador de la regla que fijó ESTE color (ej. "DT-02").
+    regla_id: str
+    # Todas las reglas evaluadas, en orden, matcheen o no. Permite mostrar en
+    # vivo por qué salió el color que salió. Nunca viene vacía.
+    traza: list[str] = Field(default_factory=list)
+
+    # --- Derivación ------------------------------------------------------- #
+    tipo_recurso_sugerido: TipoRecurso
+    especialidad_sugerida: str | None = None
+    signos_alarma_reconsulta: list[str] = Field(default_factory=list)
+
+    # --- Metadatos -------------------------------------------------------- #
+    # Versión del ruleset con el que se clasificó. Cuando un profesional
+    # revise y ajuste umbrales, cambia, y las clasificaciones viejas quedan
+    # trazables a la versión con la que se hicieron.
+    version_ruleset: str
+    # True si la respuesta salió de un fallback y no de una regla clínica
+    # positiva. El orquestador lo usa para ser más explícito con la persona
+    # sobre la incertidumbre.
+    clasificacion_por_defecto: bool = False
 
 
 class Recurso(BaseModel):
