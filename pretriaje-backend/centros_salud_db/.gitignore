@@ -1,0 +1,8 @@
+# cluster de PostgreSQL local (~65 MB, se regenera con start_db.ps1)
+postgres/pgdata/
+postgres/postgres.log
+
+# base SQLite (se regenera con crear_db.py)
+centros_salud.db
+
+__pycache__/

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import unicodedata
 from typing import Any
 
 import httpx
@@ -126,6 +127,15 @@ TOOL_ACTUALIZAR_FICHA: dict[str, Any] = {
                     "enum": [*config.MOTIVOS_CONSULTA, None],
                     "description": "Motivo principal, elegido de la lista.",
                 },
+                "sin_motivo_consulta": {
+                    "type": ["boolean", "null"],
+                    "description": (
+                        "True SOLO si la persona dice explícitamente que no "
+                        "tiene ningún síntoma ni molestia ('estoy bien', 'no "
+                        "tengo nada'). null si todavía no lo sabés. False si "
+                        "sí tiene algo. No lo deduzcas de un silencio."
+                    ),
+                },
                 "discriminadores_generales": _DISCRIMINADORES_GENERALES_SCHEMA,
                 "discriminadores_especificos": {
                     "type": ["object", "null"],
@@ -185,27 +195,53 @@ async def cerrar_cliente() -> None:
 # --------------------------------------------------------------------------- #
 
 
+# Ollama rechaza `think` en los modelos que no soportan thinking. Se descubre
+# en la primera llamada y no se vuelve a mandar en lo que dura el proceso.
+_think_soportado: bool = True
+
+
+def _armar_payload(mensajes: list[dict]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": config.MODELO,
+        "messages": mensajes,
+        "tools": [TOOL_ACTUALIZAR_FICHA],
+        "stream": False,
+        "keep_alive": config.OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": config.TEMPERATURA,
+            "num_ctx": config.NUM_CTX,
+        },
+    }
+    if _think_soportado:
+        payload["think"] = config.GEMMA_THINK
+    return payload
+
+
 async def llamar_gemma(mensajes: list[dict]) -> RespuestaGemma:
     """Manda la conversación a Ollama y devuelve la tool call ya parseada.
 
     Levanta `GemmaError` ante cualquier problema. Nunca devuelve parcial.
     """
-    payload = {
-        "model": config.MODELO,
-        "messages": mensajes,
-        "tools": [TOOL_ACTUALIZAR_FICHA],
-        "stream": False,
-        "options": {"temperature": config.TEMPERATURA},
-    }
+    global _think_soportado
 
     cliente = obtener_cliente()
     inicio = time.perf_counter()
     try:
         resp = await cliente.post(
             f"{config.OLLAMA_URL}/api/chat",
-            json=payload,
+            json=_armar_payload(mensajes),
             timeout=config.TIMEOUT_GEMMA_S,
         )
+        if resp.status_code == 400 and _think_soportado:
+            # El tag configurado no entiende `think`. Se reintenta sin el
+            # parámetro para no dejar afuera a los modelos sin thinking.
+            logger.info("think_no_soportado modelo=%s reintentando=true", config.MODELO)
+            _think_soportado = False
+            resp = await cliente.post(
+                f"{config.OLLAMA_URL}/api/chat",
+                json=_armar_payload(mensajes),
+                timeout=config.TIMEOUT_GEMMA_S,
+            )
         resp.raise_for_status()
         cuerpo = resp.json()
     except httpx.TimeoutException as exc:
@@ -249,6 +285,8 @@ def parsear_respuesta(cuerpo: dict) -> RespuestaGemma:
     # se sacan antes de validar los campos clínicos.
     pregunta = argumentos.pop("pregunta_aclaracion", None)
     confianza = argumentos.pop("confianza_extraccion", None)
+
+    _normalizar_enums(argumentos)
 
     try:
         campos = CamposExtraidos.model_validate(argumentos)
@@ -296,6 +334,93 @@ def _extraer_argumentos(tool_calls: list) -> dict:
     return dict(argumentos)
 
 
+# --------------------------------------------------------------------------- #
+# Tolerancia al modelo
+# --------------------------------------------------------------------------- #
+# Aunque el enum va declarado en el schema de la tool, los modelos igual
+# devuelven la palabra coloquial: `gemma4:12b` contesta "lúcido" donde el enum
+# espera "alerta", y eso hacía fallar la validación y perder el turno entero.
+#
+# Esto NO afloja el contrato: solo traduce sinónimos inequívocos al valor
+# canónico. Un valor que no está en la tabla sigue haciendo fallar el turno,
+# que es la decisión de diseño deliberada del proyecto (ver los tests de
+# enum inválido y de campo fuera de rango): ante una posible alucinación,
+# mejor perder el turno que ensuciar la ficha.
+
+_SINONIMOS_NIVEL_CONCIENCIA: dict[str, str] = {
+    "alerta": "alerta",
+    "alert": "alerta",
+    "lucido": "alerta",
+    "lucida": "alerta",
+    "consciente": "alerta",
+    "conciente": "alerta",
+    "despierto": "alerta",
+    "despierta": "alerta",
+    "orientado": "alerta",
+    "orientada": "alerta",
+    "normal": "alerta",
+    "somnoliento": "somnoliento",
+    "somnolienta": "somnoliento",
+    "adormecido": "somnoliento",
+    "adormecida": "somnoliento",
+    "adormilado": "somnoliento",
+    "adormilada": "somnoliento",
+    "letargico": "somnoliento",
+    "letargica": "somnoliento",
+    "confuso": "confuso",
+    "confusa": "confuso",
+    "confundido": "confuso",
+    "confundida": "confuso",
+    "desorientado": "confuso",
+    "desorientada": "confuso",
+    "no_responde": "no_responde",
+    "no responde": "no_responde",
+    "inconsciente": "no_responde",
+    "desvanecido": "no_responde",
+    "desvanecida": "no_responde",
+    "desmayado": "no_responde",
+    "desmayada": "no_responde",
+}
+
+_SINONIMOS_INICIO: dict[str, str] = {
+    "subito": "subito",
+    "repentino": "subito",
+    "brusco": "subito",
+    "de golpe": "subito",
+    "gradual": "gradual",
+    "progresivo": "gradual",
+    "paulatino": "gradual",
+    "de a poco": "gradual",
+    "lento": "gradual",
+}
+
+
+def _clave_sinonimo(valor: str) -> str:
+    """Minúsculas y sin tildes, para que 'Lúcido' y 'lucido' sean lo mismo."""
+    sin_tildes = unicodedata.normalize("NFKD", valor)
+    sin_tildes = "".join(c for c in sin_tildes if not unicodedata.combining(c))
+    return sin_tildes.strip().lower()
+
+
+def _normalizar_enums(argumentos: dict) -> None:
+    """Mapea los sinónimos coloquiales a los valores del enum, in place."""
+    dg = argumentos.get("discriminadores_generales")
+    if not isinstance(dg, dict):
+        return
+
+    for campo, tabla in (
+        ("nivel_conciencia", _SINONIMOS_NIVEL_CONCIENCIA),
+        ("inicio", _SINONIMOS_INICIO),
+    ):
+        valor = dg.get(campo)
+        if not isinstance(valor, str):
+            continue
+        canonico = tabla.get(_clave_sinonimo(valor))
+        if canonico is not None and canonico != valor:
+            logger.info("enum_normalizado campo=%s", campo)
+            dg[campo] = canonico
+
+
 def _normalizar_pregunta(valor: Any) -> str | None:
     if not isinstance(valor, str):
         return None
@@ -336,10 +461,25 @@ def merge_ficha(ficha_actual: FichaClinica, campos_nuevos: CamposExtraidos) -> F
     """
     datos = ficha_actual.model_dump()
 
-    for campo in ("edad", "es_para_tercero", "motivo_consulta"):
+    for campo in (
+        "edad",
+        "es_para_tercero",
+        "motivo_consulta",
+        "sin_motivo_consulta",
+    ):
         valor = getattr(campos_nuevos, campo)
         if valor is not None:
             datos[campo] = valor
+
+    # Si en ESTE turno aparece un motivo concreto, la persona sí tenía algo que
+    # consultar: el "no tengo nada" de antes queda sin efecto.
+    #
+    # Se mira `campos_nuevos` y no la ficha ya mergeada para no romper la
+    # invariante del módulo: un merge sin campos no puede cambiar nada. La
+    # protección de fondo igual está en `orquestador.sin_necesidad_de_triaje`,
+    # que exige que no haya ningún motivo cargado.
+    if campos_nuevos.motivo_consulta:
+        datos["sin_motivo_consulta"] = False
 
     # Slug fuera de la lista soportada: se lo manda al catch-all en vez de
     # pasarle basura al motor de reglas.
@@ -428,6 +568,7 @@ async def redactar_resultado(mensaje_plantilla: str) -> str:
                     {"role": "user", "content": mensaje_plantilla},
                 ],
                 "stream": False,
+                "think": config.GEMMA_THINK,
                 "options": {"temperature": 0.3},
             },
             timeout=config.TIMEOUT_GEMMA_S,

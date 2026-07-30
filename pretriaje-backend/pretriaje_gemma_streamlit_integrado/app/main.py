@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 
-from app import config, gemma, orquestador, session
+from app import centros_db, config, gemma, orquestador, session
 from app.schema import MensajeRequest, RespuestaAPI, SesionResponse
 
 # Logging estructurado en formato clave=valor. NUNCA se loguea contenido
@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await gemma.cerrar_cliente()
+        centros_db.cerrar_engine()
         # Al apagar no queda ningún dato de salud en memoria.
         session.limpiar_todo()
         logger.info("app_detenida")
@@ -55,9 +56,8 @@ app = FastAPI(
     title="Pre-triaje - Backend de recolección conversacional",
     description=(
         "Prototipo de hackathon. Recolecta información clínica por chat para "
-        "que un motor de reglas asigne la urgencia, con una lógica de "
-        "priorización basada en la estructura del triaje de Manchester. NO es "
-        "una implementación validada del MTS y NO tiene validación clínica."
+        "que un motor de reglas de Manchester asigne la urgencia. "
+        "SIN validación clínica."
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -91,6 +91,7 @@ async def mensaje(req: MensajeRequest) -> RespuestaAPI:
         imagen_b64=req.imagen_b64,
         lat=req.lat,
         lng=req.lng,
+        ciudad=req.ciudad,
     )
 
 
@@ -130,15 +131,25 @@ async def health() -> dict:
             ),
         )
 
+    # La base de centros NO condiciona el estado: sin ella el triaje sigue
+    # funcionando y la persona igual recibe su nivel de urgencia y las
+    # indicaciones de seguridad. Solo pierde la sugerencia de dónde ir, así que
+    # se reporta aparte para que el frontend pueda avisarlo.
     return {
         "estado": "ok",
         "modelo": config.MODELO,
         "ollama": config.OLLAMA_URL,
         "sesiones_activas": session.cantidad_sesiones(),
+        "centros_db": centros_db.disponible(),
+        "ciudad_paciente": config.CIUDAD_PACIENTE,
     }
 
 
 def _modelo_disponible(modelo: str, disponibles: list[str]) -> bool:
-    """Compara tolerando el tag: 'gemma4:e4b' matchea 'gemma4:e4b' y 'gemma4'."""
-    base = modelo.split(":")[0]
-    return any(d == modelo or d.split(":")[0] == base for d in disponibles)
+    """Exige el tag configurado para no ejecutar por accidente otro tamaño.
+
+    En este proyecto `gemma4:e4b` y `gemma4:e2b-it-qat` no son intercambiables:
+    el primero puede exceder la memoria del equipo aunque ambos compartan la
+    misma familia.
+    """
+    return modelo in disponibles

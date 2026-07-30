@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 
-from app import config
+from app import config, reglas
 from app.schema import FichaClinica, SesionState
 
 # --------------------------------------------------------------------------- #
@@ -70,6 +70,49 @@ lo incluís (o lo mandás en null).
 - `confianza_extraccion` es un número de 0.0 a 1.0: qué tan seguro estás de \
 que lo que extrajiste refleja lo que la persona dijo. Si el mensaje fue \
 confuso, ambiguo o muy corto, va bajo. Sé honesto, no infles este número.
+
+## Campos con vocabulario cerrado
+
+Estos campos aceptan UNA de estas palabras exactas y nada más. No escribas una \
+frase, ni una explicación, ni copies lo que dijo la persona. Si ninguna opción \
+aplica con claridad, el campo va en null.
+
+- `nivel_conciencia`: alerta | somnoliento | confuso | no_responde
+  - "lúcido", "despierto", "orientado", "bien" → alerta
+  - "adormecido", "medio dormido", "le cuesta mantenerse despierto" → somnoliento
+  - "confundido", "desorientado", "no me sigue la conversación" → confuso
+  - "inconsciente", "desmayado", "no responde" → no_responde
+- `inicio`: subito | gradual
+  - "de golpe", "de repente", "de un momento a otro" → subito
+  - "de a poco", "fue empeorando", "progresivo" → gradual
+
+Ojo con las negaciones: "no estoy confundido" NO es `confuso`, es `alerta`.
+
+Mensaje: "tengo 52 y me siento confundido, me cuesta seguir la conversación"
+→ actualizar_ficha({
+  "edad": 52,
+  "discriminadores_generales": {"nivel_conciencia": "confuso"},
+  "pregunta_aclaracion": "¿Estás respirando con normalidad o te cuesta tomar aire?",
+  "confianza_extraccion": 0.9
+})
+(`nivel_conciencia` va con la palabra exacta del vocabulario, NO con la frase \
+que usó la persona.)
+
+## Si la persona dice que no tiene nada
+
+A veces alguien entra y no viene a consultar ningún síntoma. Si dice cosas
+como "estoy bien", "no tengo nada", "no me pasa nada", **ponés
+`sin_motivo_consulta` en true** y seguís preguntando SOLO los cuatro
+discriminadores generales (respiración, conciencia, sangrado, garganta), que
+son los que descartan un riesgo que la persona podría no estar registrando.
+
+Cuando esos cuatro estén respondidos, `pregunta_aclaracion` va en null. No
+insistas buscándole un síntoma: si ya dijo dos veces que no tiene nada, no
+tiene nada. Repetirle la misma pregunta no aporta y da la impresión de que no
+se la escuchó.
+
+Si más adelante menciona un síntoma, ponés `sin_motivo_consulta` en false y
+seguís normalmente.
 
 ## Cómo elegir la pregunta
 
@@ -168,8 +211,16 @@ def _resumen_ficha(ficha: FichaClinica) -> dict:
 
 
 def bloque_contexto(ficha: FichaClinica) -> str:
-    """Segundo bloque `system`: estado actual de la ficha y qué falta."""
-    faltantes = detectar_faltantes(ficha)
+    """Segundo bloque `system`: estado actual de la ficha y qué falta.
+
+    Los faltantes salen del motor de reglas, que sabe qué discriminadores mira
+    cada flowchart. Es la pieza que permite que el resultado baje de amarillo:
+    el motor no afirma "podés esperar" sin evidencia positiva de benignidad, y
+    esa evidencia son justamente los discriminadores específicos del motivo.
+    Si no se le dice a Gemma cuáles son, nunca los completa y todo termina en
+    amarillo.
+    """
+    faltantes = reglas.campos_requeridos(ficha)
     partes = [
         "Estado actual de la recolección (esto NO se lo muestres a la persona).",
         f"Ficha actual: {json.dumps(_resumen_ficha(ficha), ensure_ascii=False)}",
@@ -187,6 +238,17 @@ def bloque_contexto(ficha: FichaClinica) -> str:
     partes.append(
         "Motivos de consulta válidos: " + ", ".join(config.MOTIVOS_CONSULTA) + "."
     )
+
+    especificos = reglas.DISCRIMINADORES_POR_MOTIVO.get(ficha.motivo_consulta or "")
+    if especificos:
+        partes.append(
+            f"Para el motivo '{ficha.motivo_consulta}', los campos de "
+            "`discriminadores_especificos` que sirven son EXACTAMENTE estos: "
+            + ", ".join(especificos)
+            + ". Usá esos nombres tal cual, con valor true o false. "
+            "Poné false cuando la persona lo negó, no lo omitas: un false es "
+            "información y un campo ausente no."
+        )
     return "\n".join(partes)
 
 

@@ -1,5 +1,128 @@
-﻿.venv/
+# =========================================================================== #
+#  Pre-triaje conversacional — reglas de ignorado del repositorio
+#
+#  Estas reglas valen para TODO el proyecto. Cada subcarpeta tiene además su
+#  propio .gitignore con lo que es específico de ella; los patrones de acá se
+#  suman a esos, no los reemplazan.
+#
+#  Criterio: se ignora lo que se regenera, lo que pesa, y lo que es propio de
+#  una computadora. Todo lo que hace falta para levantar el proyecto en otra
+#  máquina va versionado.
+# =========================================================================== #
+
+
+# --------------------------------------------------------------------------- #
+#  Python
+# --------------------------------------------------------------------------- #
+
 __pycache__/
 *.py[cod]
-.env
+*$py.class
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Entornos virtuales (~414 MB). NUNCA se versionan: un .venv guarda la ruta
+# absoluta del intérprete que lo creó, así que el que viaja dentro del repo
+# llega muerto a cualquier otra computadora. Se recrea con preparar_entorno.ps1
+# o directamente con iniciar_todo.ps1.
+.venv/
+venv/
+env/
+ENV/
+
+
+# --------------------------------------------------------------------------- #
+#  Configuración propia de cada máquina
+# --------------------------------------------------------------------------- #
+
+# El .env tiene el tag del modelo de Ollama, que cambia de equipo en equipo, y
+# la ubicación simulada. Se versiona .env.example como plantilla.
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Secretos de Streamlit. El .streamlit/config.toml SÍ se versiona: define el
+# arranque del proyecto (headless, sólo localhost) y tiene que ser igual para
+# todo el equipo.
+.streamlit/secrets.toml
+
+
+# --------------------------------------------------------------------------- #
+#  Base de datos de centros de salud
+# --------------------------------------------------------------------------- #
+
+# Cluster de PostgreSQL local (~65 MB). Lo recrea start_db.ps1 desde
+# postgres/schema.sql + postgres/seed.sql, que sí están versionados.
+pgdata/
+postgres.log
+
+# Base SQLite, se regenera con crear_db.py desde datos/centros.json.
+centros_salud.db
+*.sqlite
+*.sqlite3
+
+
+# --------------------------------------------------------------------------- #
+#  Modelos y descargas
+# --------------------------------------------------------------------------- #
+#  Gemma vive en Ollama, fuera del repo. Si alguien deja un modelo suelto acá
+#  por error, que no termine en un commit: son varios GB.
+
+*.gguf
+*.safetensors
+*.bin
+models/
+
+
+# --------------------------------------------------------------------------- #
+#  Archivos comprimidos
+# --------------------------------------------------------------------------- #
+#  Los backups del propio proyecto (HackatonGemma.rar pesaba 109 MB) no van al
+#  repo: para eso está el historial de git.
+
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+
+# --------------------------------------------------------------------------- #
+#  Editores y herramientas
+# --------------------------------------------------------------------------- #
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code: settings.json se comparte (permisos y config del equipo),
+# settings.local.json es de cada persona.
+.claude/settings.local.json
+
+
+# --------------------------------------------------------------------------- #
+#  Sistema operativo
+# --------------------------------------------------------------------------- #
+
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+
+# --------------------------------------------------------------------------- #
+#  Temporales y logs
+# --------------------------------------------------------------------------- #
+
+*.log
+*.tmp
+*.bak
+tmp/
+temp/

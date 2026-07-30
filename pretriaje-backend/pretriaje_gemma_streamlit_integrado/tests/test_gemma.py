@@ -141,6 +141,73 @@ def test_enum_invalido_levanta_gemma_error():
 
 
 # --------------------------------------------------------------------------- #
+# Normalización de sinónimos
+# --------------------------------------------------------------------------- #
+# El modelo contesta con la palabra coloquial aunque el enum esté en el schema.
+# Traducir un sinónimo inequívoco no afloja el contrato: lo que no está en la
+# tabla sigue cayendo en `validacion` (ver el test de arriba).
+
+
+@pytest.mark.parametrize(
+    ("crudo", "esperado"),
+    [
+        ("lúcido", "alerta"),
+        ("Lucido", "alerta"),
+        ("consciente", "alerta"),
+        ("despierta", "alerta"),
+        ("adormecido", "somnoliento"),
+        ("letárgico", "somnoliento"),
+        ("confundido", "confuso"),
+        ("desorientada", "confuso"),
+        ("inconsciente", "no_responde"),
+        ("no responde", "no_responde"),
+    ],
+)
+def test_normaliza_sinonimos_de_nivel_conciencia(crudo, esperado):
+    body = _body(
+        {
+            "discriminadores_generales": {"nivel_conciencia": crudo},
+            "confianza_extraccion": 0.9,
+        }
+    )
+    r = parsear_respuesta(body)
+    assert r.campos.discriminadores_generales.nivel_conciencia == esperado
+
+
+@pytest.mark.parametrize(
+    ("crudo", "esperado"),
+    [
+        ("repentino", "subito"),
+        ("de golpe", "subito"),
+        ("Progresivo", "gradual"),
+        ("de a poco", "gradual"),
+    ],
+)
+def test_normaliza_sinonimos_de_inicio(crudo, esperado):
+    body = _body(
+        {"discriminadores_generales": {"inicio": crudo}, "confianza_extraccion": 0.9}
+    )
+    r = parsear_respuesta(body)
+    assert r.campos.discriminadores_generales.inicio == esperado
+
+
+def test_la_normalizacion_no_toca_los_valores_ya_canonicos():
+    body = _body(
+        {
+            "discriminadores_generales": {
+                "nivel_conciencia": "somnoliento",
+                "inicio": "gradual",
+            },
+            "confianza_extraccion": 0.9,
+        }
+    )
+    r = parsear_respuesta(body)
+    dg = r.campos.discriminadores_generales
+    assert dg.nivel_conciencia == "somnoliento"
+    assert dg.inicio == "gradual"
+
+
+# --------------------------------------------------------------------------- #
 # Schema de la tool
 # --------------------------------------------------------------------------- #
 

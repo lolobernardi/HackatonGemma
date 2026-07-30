@@ -42,16 +42,32 @@ def _env_int(clave: str, default: int) -> int:
         return default
 
 
+def _env_float(clave: str, default: float) -> float:
+    try:
+        return float(os.getenv(clave, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # --------------------------------------------------------------------------- #
 # Ollama / modelo
 # --------------------------------------------------------------------------- #
 
 OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODELO: str = os.getenv("MODELO", "gemma4:e4b")
+MODELO: str = os.getenv("MODELO", "gemma4:e2b-it-qat")
 
 # Extracción, no creatividad: temperatura casi nula.
 TEMPERATURA: float = 0.1
-TIMEOUT_GEMMA_S: float = 25.0
+TIMEOUT_GEMMA_S: float = _env_float("TIMEOUT_GEMMA_S", 90.0)
+OLLAMA_KEEP_ALIVE: str = os.getenv("OLLAMA_KEEP_ALIVE", "10m")
+NUM_CTX: int = _env_int("NUM_CTX", 4096)
+
+# Los tags de Gemma con capacidad de "thinking" (por ejemplo `gemma4:12b`)
+# razonan en voz alta por defecto y agotan la salida antes de emitir la tool
+# call: el turno termina siempre en `sin_tool_call`. Apagarlo es lo que hace
+# que la extracción estructurada funcione, y de paso es mucho más rápido.
+# Los tags sin thinking rechazan el parámetro; ver el fallback en `gemma.py`.
+GEMMA_THINK: bool = _env_bool("GEMMA_THINK", False)
 
 # --------------------------------------------------------------------------- #
 # Comportamiento del orquestador
@@ -60,6 +76,15 @@ TIMEOUT_GEMMA_S: float = 25.0
 DEBUG_MODE: bool = _env_bool("DEBUG_MODE", False)
 MAX_PREGUNTAS: int = _env_int("MAX_PREGUNTAS", 3)
 MAX_TURNOS: int = _env_int("MAX_TURNOS", 8)
+
+# Turnos seguidos sin que la ficha gane ni un campo antes de cerrar igual.
+#
+# Hay datos que la persona simplemente no tiene: no se tomó la temperatura, no
+# quiere decir la edad. Sin este corte, el sistema le insiste hasta agotar
+# MAX_PREGUNTAS reformulando la misma pregunta, que es la conversación que hace
+# sentir que no se la escuchó. Se cierra y se clasifica con lo que haya, que es
+# el camino conservador que el motor ya sabe manejar.
+MAX_TURNOS_SIN_AVANCE: int = _env_int("MAX_TURNOS_SIN_AVANCE", 2)
 
 # Cuántos turnos del historial se le reenvían a Gemma en cada llamada.
 HISTORIAL_TURNOS: int = _env_int("HISTORIAL_TURNOS", 6)
@@ -74,6 +99,48 @@ BARRIDO_INTERVALO_S: int = 60
 # Segunda llamada opcional a Gemma para redactar el mensaje final más lindo.
 # Apagada por defecto: la plantilla determinística siempre alcanza.
 REDACCION_LLM: bool = _env_bool("REDACCION_LLM", False)
+
+# --------------------------------------------------------------------------- #
+# Base de centros de salud
+# --------------------------------------------------------------------------- #
+# La levanta el proyecto hermano `centros_salud_db` con `.\start_db.ps1`.
+
+CENTROS_DB_URL: str = os.getenv(
+    "CENTROS_DB_URL",
+    "postgresql+psycopg2://postgres@127.0.0.1:5438/centros_salud",
+)
+CENTROS_DB_TIMEOUT_S: int = _env_int("CENTROS_DB_TIMEOUT_S", 5)
+
+# Cuántos centros se le muestran a la persona. Más de tres no ayuda a decidir.
+MAX_CENTROS_SUGERIDOS: int = _env_int("MAX_CENTROS_SUGERIDOS", 3)
+
+# Ciudad por defecto si la persona no elige ninguna. El frontend le pregunta
+# la ubicación, así que en la práctica este valor casi nunca se usa.
+CIUDAD_PACIENTE: str = os.getenv("CIUDAD_PACIENTE", "Oro Verde")
+
+# Localidades que el frontend ofrece, con sus coordenadas. Sirven para dos
+# cosas: mostrar el desplegable y, cuando la persona comparte su ubicación real
+# o elige una localidad sin cobertura, calcular cuál es la ciudad con centros
+# cargados más cercana.
+#
+# Las coordenadas son las del centro de cada localidad, redondeadas. Alcanzan
+# de sobra para decidir entre Paraná y Santa Fe, que están a 25 km una de otra.
+LOCALIDADES: dict[str, tuple[float, float]] = {
+    "Oro Verde": (-31.8333, -60.5167),
+    "Paraná": (-31.7333, -60.5238),
+    "San Benito": (-31.7667, -60.4500),
+    "Colonia Avellaneda": (-31.7500, -60.4667),
+    "Santa Fe": (-31.6333, -60.7000),
+    "Santo Tomé": (-31.6667, -60.7667),
+}
+
+# Ciudades que la base realmente tiene cargadas. Cualquier otra localidad se
+# resuelve buscando la más cercana de estas por distancia real.
+CIUDADES_CON_COBERTURA: tuple[str, ...] = ("Paraná", "Santa Fe")
+
+# Hasta qué distancia se considera razonable derivar a otra ciudad. Más lejos
+# que esto, se ofrece igual pero el mensaje lo aclara con más énfasis.
+DISTANCIA_MAXIMA_DERIVACION_KM: float = 60.0
 
 # --------------------------------------------------------------------------- #
 # Dominio clínico
@@ -91,6 +158,69 @@ MOTIVOS_CONSULTA: tuple[str, ...] = (
     "lesion_cutanea",
     "otro",
 )
+
+# --------------------------------------------------------------------------- #
+# Traducción del vocabulario del motor de reglas al de la base
+# --------------------------------------------------------------------------- #
+# A qué especialista derivar lo decide `reglas.py`, no este archivo: es
+# conocimiento clínico y vive en un solo lugar (ver `app/REGLAS.md`). Acá sólo
+# se traduce el slug que emite el ruleset al nombre exacto que usa la tabla
+# `especialidades` de la base.
+#
+# Un `None` significa "el ruleset la pide pero la base no la tiene": son
+# especialidades que ningún efector de Paraná ni Santa Fe declara. En ese caso
+# se busca por la de respaldo en vez de devolver cero centros.
+
+ESPECIALIDAD_DB: dict[str, str | None] = {
+    "cardiologia": "Cardiología",
+    "cirugia_general": "Cirugía",
+    "gastroenterologia": "Gastroenterología",
+    "ginecologia": "Ginecología",
+    "pediatria": "Pediatría",
+    # Sin cobertura en la base (0 centros la declaran).
+    "dermatologia": None,
+    "infectologia": None,
+    "neumonologia": None,
+    "neurologia": None,
+}
+
+# Especialidad de respaldo cuando la específica no existe o no da resultados.
+ESPECIALIDAD_FALLBACK: str = "Medicina General"
+
+# Si el motor no sugiere especialista y la consulta es por un menor, igual
+# conviene un pediatra.
+ESPECIALIDAD_PEDIATRICA: str = "Pediatría"
+EDAD_PEDIATRICA_MAX: int = 14
+
+# Con urgencia alta y sin especialista sugerido, lo que hace falta es un
+# efector con guardia, no medicina general.
+ESPECIALIDAD_URGENCIA: str = "Emergencias"
+TIPOS_RECURSO_DE_URGENCIA: tuple[str, ...] = ("guardia_alta_complejidad", "guardia")
+
+# --------------------------------------------------------------------------- #
+# Tipo de efector sugerido -> tipos que existen en la base
+# --------------------------------------------------------------------------- #
+# `reglas.py` devuelve `tipo_recurso_sugerido` con su propio vocabulario
+# (guardia_alta_complejidad, guardia, centro_urgencias, caps,
+# consulta_programada). La base tiene otros: hospital, CAPS, centro de salud,
+# CIC, SAMCO, centro de especialidades.
+#
+# Se listan en orden de preferencia y `recursos.py` los prueba uno por uno. La
+# regla de fondo: no mandar un azul a una guardia de alta complejidad, porque
+# satura el sistema, y no mandar un naranja a un CAPS, porque no lo resuelve.
+
+TIPOS_POR_RECURSO: dict[str, tuple[str, ...]] = {
+    "guardia_alta_complejidad": ("hospital",),
+    "guardia": ("hospital",),
+    "centro_urgencias": ("hospital", "CAPS", "centro de salud"),
+    "caps": ("CAPS", "centro de salud", "CIC", "SAMCO"),
+    "consulta_programada": (
+        "centro de salud",
+        "CAPS",
+        "centro de especialidades",
+        "CIC",
+    ),
+}
 
 # Discriminadores generales que definen riesgo vital. Son los únicos que mira
 # `orquestador.es_bandera_roja` y los que exige `ficha_suficiente`.
@@ -190,6 +320,23 @@ SIGNOS_ALARMA = (
     "• Te sentís muy adormecido, confundido o te desmayás.\n"
     "• Aparece un sangrado que no para.\n"
     "• Tenés fiebre alta que no baja, o la persona es un bebé menor de 3 meses."
+)
+
+# La persona no vino a consultar ningún síntoma y los cuatro discriminadores de
+# riesgo vital dieron benignos. No se le asigna color: no hay nada que
+# priorizar. Igual se cierra con red de seguridad, porque puede volver.
+MENSAJE_SIN_MOTIVO = (
+    "Por lo que me contaste, no tenés ningún síntoma ahora y no encontré "
+    "señales de alarma. **No hace falta que consultes por esto.**\n\n"
+    "Si en algún momento aparece alguna de estas cosas, volvé a escribirme o "
+    "llamá al 107:\n"
+    "• Te cuesta respirar o te falta el aire.\n"
+    "• Dolor fuerte en el pecho o en la panza.\n"
+    "• Te sentís muy adormecido, confundido o te desmayás.\n"
+    "• Aparece un sangrado que no para.\n"
+    "• Fiebre alta que no baja.\n\n"
+    "Y si querés hacerte un control de rutina, pedí un turno en el centro de "
+    "salud que te quede más cerca: para eso no hace falta una guardia."
 )
 
 DISCLAIMER_FINAL = (

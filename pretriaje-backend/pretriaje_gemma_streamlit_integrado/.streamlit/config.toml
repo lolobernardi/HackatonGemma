@@ -1,0 +1,19 @@
+# Configuración del proyecto, para que el arranque sea siempre el mismo.
+
+[server]
+# Solo local, igual que el backend (uvicorn escucha en 127.0.0.1). Sin esto
+# Streamlit se publica en 0.0.0.0 y queda accesible desde toda la red, algo que
+# no corresponde a un prototipo que dice procesar los datos en esta máquina.
+# Si necesitás demostrarlo desde otro dispositivo, comentá esta línea.
+# address = "localhost"
+# Sin esto, en el primer arranque de cada máquina Streamlit pide un email por
+# consola ("Welcome to Streamlit!") y se queda esperando. Si nadie contesta,
+# el proceso termina y parece que la app "se abre y se cierra".
+headless = true
+
+# El proyecto puede estar en una carpeta sincronizada (OneDrive). Vigilar sólo
+# lo propio evita reinicios en loop por la sincronización de .venv.
+folderWatchBlacklist = [".venv"]
+
+[browser]
+gatherUsageStats = false
